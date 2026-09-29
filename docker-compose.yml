@@ -1,0 +1,44 @@
+name: returns-agent
+
+x-healthcheck: &healthcheck
+  interval: 3s
+  timeout: 3s
+  retries: 20
+  start_period: 5s
+
+services:
+  mock-llm:
+    build: ./mock_llm
+    ports: ["${LLM_PORT:-8100}:8100"]
+    environment:
+      MOCK_LLM_RPM: ${MOCK_LLM_RPM:-1200}
+      MOCK_LLM_TPM: ${MOCK_LLM_TPM:-600000}
+      MOCK_LLM_ERROR_RATE: ${MOCK_LLM_ERROR_RATE:-0.02}
+      MOCK_LLM_SEED: ${MOCK_LLM_SEED:-7}
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/healthz', timeout=2)"]
+
+  commerce:
+    build: ./commerce
+    ports: ["${COMMERCE_PORT:-8200}:8200"]
+    environment:
+      WORKLOAD_PATH: /data/workload.json
+    volumes:
+      - ./harness/data/workload.json:/data/workload.json:ro
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8200/healthz', timeout=2)"]
+
+  api:
+    build: ./agent
+    ports: ["${API_PORT:-8000}:8000"]
+    environment:
+      LLM_BASE_URL: http://mock-llm:8100/v1
+      COMMERCE_URL: http://commerce:8200
+    depends_on:
+      mock-llm: { condition: service_healthy }
+      commerce: { condition: service_healthy }
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=2)"]
