@@ -7,7 +7,7 @@ provider's ledger (calls, status codes, cost). Everything it reports comes from 
 
 ## Running it
 
-From the repo root, with the stack running (`make up`):
+From the assignment folder (the one with `docker-compose.yml`), with the stack running (`make up`):
 
 ```bash
 make smoke           # 30 tickets at 1/s, no chaos
@@ -74,8 +74,8 @@ spike, 80% of arrivals are tickets from the large account `cust-01`.
 ### Chaos targets
 
 Chaos kills containers of the compose services named in the `CHAOS_TARGETS` environment variable. If that is not set,
-it reads `.chaos` at the repo root, a comma-separated list such as `api,worker`. If neither exists, the target is `api`.
-It uses `docker compose ps -q <service>` from the repo root to find containers. If Docker or Compose isn't available,
+it reads `.chaos` in the assignment folder, a comma-separated list such as `api,worker`. If neither exists, the target is `api`.
+It uses `docker compose ps -q <service>` from the assignment folder to find containers. If Docker or Compose isn't available,
 the bench prints a warning and runs without chaos. The scoreboard shows `chaos=on, but docker unavailable`.
 
 ## The scoreboard
