@@ -1,6 +1,6 @@
 """Chaos: kill a random container of the target compose services every 10-20 s and start it again 3 s later.
 
-Targets come from the CHAOS_TARGETS environment variable or the `.chaos` file at the repo root (comma-separated
+Targets come from the CHAOS_TARGETS environment variable or the `.chaos` file next to docker-compose.yml (comma-separated
 compose service names, default "api"). Every killed container is started again: after the 3 s pause, when chaos is
 stopped, and on errors or Ctrl-C (restore_all() is synchronous and idempotent). A kill that fails (say the container
 exited on its own after it was listed) is logged and that container is left alone. If docker is not available, chaos

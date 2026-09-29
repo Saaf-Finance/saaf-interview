@@ -78,7 +78,7 @@ Timeouts, retry counts and the approval threshold are in `app/config.py`.
 
 ## Running
 
-With Docker Compose from the repo root the service runs as `api` on port 8000.
+With Docker Compose from the assignment folder the service runs as `api` on port 8000.
 
 Locally (needs [uv](https://docs.astral.sh/uv/); the LLM and store backend must be reachable):
 
