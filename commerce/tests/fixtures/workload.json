@@ -1,0 +1,19 @@
+{
+  "seed": 1,
+  "customers": [
+    {"customer_id": "cust-01"},
+    {"customer_id": "cust-02"}
+  ],
+  "orders": {
+    "O-00001": {"order_id": "O-00001", "customer_id": "cust-01", "amount": 42.5, "currency": "USD", "days_since_delivery": 5, "final_sale": false, "status": "delivered"},
+    "O-00002": {"order_id": "O-00002", "customer_id": "cust-01", "amount": 1250.0, "currency": "USD", "days_since_delivery": 12, "final_sale": false, "status": "delivered"},
+    "O-00003": {"order_id": "O-00003", "customer_id": "cust-02", "amount": 89.99, "currency": "USD", "days_since_delivery": 3, "final_sale": true, "status": "delivered"},
+    "O-00004": {"order_id": "O-00004", "customer_id": "cust-02", "amount": 64.0, "currency": "USD", "days_since_delivery": null, "final_sale": false, "status": "partially_shipped"},
+    "O-00005": {"customer_id": "cust-02", "amount": 19.999, "days_since_delivery": 45}
+  },
+  "tickets": [
+    {"ticket_id": "T-00001", "customer_id": "cust-01", "order_id": "O-00001", "email": "cust-01@example.com", "message": "The mug arrived broken, can I get a refund?"},
+    {"ticket_id": "T-00002", "customer_id": "cust-01", "order_id": "O-00002", "email": "cust-01@example.com", "message": "I'd like to return the desk, it doesn't fit."}
+  ],
+  "expected": {}
+}
