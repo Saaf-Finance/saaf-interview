@@ -347,6 +347,36 @@ def test_submit_counts_and_extra_refunds():
     assert m["hard"]["lost_runs"] == 1
 
 
+def test_submit_attempts_include_duplicate_deliveries():
+    expected = {"T1": exp("not_refund"), "T2": exp("not_refund")}
+    subs = [submit("T1", attempts=2), submit("T2", accepted=False, attempts=5)]
+    subs[0]["duplicate_delivery"] = [{"attempt": 1, "ts": T0 + 3, "status": 503},
+                                     {"attempt": 2, "ts": T0 + 4, "status": 202}]
+    subs[1]["duplicate_delivery"] = None  # delivered once
+    m = compute(subs, workload(expected), observed({"T1": [run("T1")]}, emails=[email("T1")]))
+    assert m["soft"]["submits"] == {"tickets": 2, "attempts": 9, "failed_tickets": 1}
+    rows = {r["ticket_id"]: r for r in m["tickets"]}
+    assert [a["status"] for a in rows["T1"]["duplicate_delivery"]] == [503, 202]
+    assert len(rows["T1"]["submit_attempts"]) == 2 and rows["T2"]["duplicate_delivery"] is None
+
+
+def test_run_records_without_run_id_are_dropped_and_the_ticket_is_lost():
+    expected = {"T1": exp("not_refund"), "T2": exp("not_refund")}
+    finished = {"ticket_id": "T1", "status": "completed", "finished_at": T0 + 1}
+    runs_t1, err = normalize_runs({"runs": [finished, {**finished, "run_id": ""}, {**finished, "run_id": "  "},
+                                            {**finished, "run_id": None}, {**finished, "run_id": True},
+                                            {**finished, "run_id": {"id": "a"}}]}, "T1")
+    assert err is None and runs_t1 == []
+    runs_t2, _ = normalize_runs({"runs": [{**finished, "ticket_id": "T2"}, run("T2", run_id="b")]}, "T2")
+    assert [r["run_id"] for r in runs_t2] == ["b"]
+    runs_t3, _ = normalize_runs({"runs": [run("T3", run_id="c"), run("T3", run_id="c "), run("T3", run_id="c")]}, "T3")
+    assert [r["run_id"] for r in runs_t3] == ["c", "c "]  # only exact repeats are merged
+    m = compute([submit(t) for t in expected], workload(expected),
+                observed({"T1": runs_t1, "T2": runs_t2}, emails=[email("T1"), email("T2")]))
+    assert m["hard"]["lost_runs"] == 1 and m["flagged"]["lost_runs"] == ["T1"]
+    assert m["hard"]["duplicate_runs"] == 0 and m["passed"] is False
+
+
 def test_normalize_runs_shapes():
     assert normalize_runs("nope", "T1") == ([], "response has no 'runs' list")
     assert normalize_runs({"items": []}, "T1")[1] is not None
@@ -364,6 +394,19 @@ def test_normalize_commerce_and_llm_reject_garbage():
     assert normalize_llm({"detail": "Not Found"})[0] is None
     assert normalize_llm([1, 2])[0] is None
     assert summarize_llm_entries({"nope": 1})[0] is None
+
+
+def test_partial_llm_summary_is_rejected():
+    full = {"calls": 5, "by_status": {"200": 4, "429": 1}, "cost_usd": 0.004, "dropped_streams": 1,
+            "per_ticket": {"T1": {"calls": 5, "ok_calls": 4, "cost_usd": 0.004}}}
+    summary, error = normalize_llm(full)
+    assert error is None and summary["calls"] == 5 and summary["dropped_streams"] == 1
+    for field in full:
+        summary, error = normalize_llm({k: v for k, v in full.items() if k != field})
+        assert summary is None and repr(field) in error
+    summary, error = normalize_llm({**full, "calls": "many", "per_ticket": []})
+    assert summary is None and "'calls'" in error and "'per_ticket'" in error
+    assert normalize_llm({"calls": 5, "by_status": {"200": 5}})[0] is None  # intersecting isn't enough
 
 
 def test_raw_llm_entries_match_summary():

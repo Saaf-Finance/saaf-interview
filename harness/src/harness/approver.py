@@ -2,7 +2,8 @@
 
 Every second it lists GET /runs?status=awaiting_approval. A run first seen at time t gets its decision at
 t + approval_delay_s (from the workload): POST /runs/{run_id}/approve {"approved": ..., "approver": "harness"}.
-Errors are tolerated and retried on the next tick, since the service may be restarting.
+Errors are tolerated and retried on the next tick, since the service may be restarting. Records without a non-empty
+`run_id` (a string or an integer) and a non-empty string `ticket_id` are skipped.
 
 For each ticket the approver records `approved_ts`: the send time of the first approve request (with approved=true)
 that may have reached the service, i.e. any attempt except a refused connection or a 4xx other than 409. Refunds are
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from urllib.parse import quote
 
 import httpx
 
@@ -67,14 +69,18 @@ class Approver:
             return
         now = time.time()
         for record in records:
-            if not isinstance(record, dict) or record.get("run_id") is None:
+            if not isinstance(record, dict):
+                continue
+            run_id, ticket_id = record.get("run_id"), record.get("ticket_id")
+            if isinstance(run_id, bool) or not isinstance(run_id, (str, int)):
+                continue  # malformed record: skip it, the rest of the list is still usable
+            run_id = str(run_id)
+            if not (run_id.strip() and isinstance(ticket_id, str) and ticket_id):
                 continue
             if isinstance(record.get("status"), str) and record["status"] != "awaiting_approval":
                 continue
-            run_id = str(record["run_id"])
             if run_id in self.runs:
                 continue
-            ticket_id = record.get("ticket_id")
             exp = self.expected.get(ticket_id) or {}
             delay = exp.get("approval_delay_s")
             delay = float(delay) if isinstance(delay, (int, float)) else DEFAULT_DELAY_S
@@ -104,7 +110,7 @@ class Approver:
         state["attempts"].append(attempt)
         maybe_delivered = True
         try:
-            resp = await client.post(f"{self.sut_url}/runs/{state['run_id']}/approve",
+            resp = await client.post(f"{self.sut_url}/runs/{quote(state['run_id'], safe='')}/approve",
                                      json={"approved": state["decision"], "approver": APPROVER_NAME})
             attempt["status"] = resp.status_code
             if 200 <= resp.status_code < 300 or resp.status_code == 409:

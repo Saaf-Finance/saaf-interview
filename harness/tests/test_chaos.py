@@ -3,6 +3,7 @@
 import asyncio
 import os
 import stat
+import subprocess
 
 import pytest
 
@@ -14,20 +15,36 @@ case "$1" in
   info) {info} ;;
   compose)
     if [ "$2" = "version" ]; then echo "Docker Compose version v2"; exit 0; fi
-    if [ "$4" = "api" ]; then echo "aaaaaaaaaaaa1111"; echo "bbbbbbbbbbbb2222"; fi
-    if [ "$4" = "worker" ]; then echo "cccccccccccc3333"; fi
+    echo 'WARN[0000] The "TOKEN" variable is not set. Defaulting to a blank string.' >&2
+    case "$4" in
+      api) echo "aaaaaaaaaaaa1111"; echo "bbbbbbbbbbbb2222" ;;
+      worker) echo "cccccccccccc3333" ;;
+      gone) echo "dddddddddddd4444" ;;
+      slow) echo "eeeeeeeeeeee5555" ;;
+      noisy)
+        echo "WARN[0000] Found orphan containers for this project"; echo "ffffffffffff6666"
+        echo "WARN[0000] container 999999999999aaaa is restarting" >&2 ;;
+      broken) echo "no such service: broken" >&2; exit 1 ;;
+    esac
     ;;
-  kill|start) echo "$2" ;;
+  kill)
+    if [ "$2" = "dddddddddddd4444" ]; then echo "Error response from daemon: container $2 is not running" >&2; exit 1; fi
+    if [ "$2" = "eeeeeeeeeeee5555" ]; then exec sleep 5; fi
+    echo "$2" ;;
+  start) echo "$2" ;;
 esac
 """
 
 
 def make_docker(tmp_path, info="echo 29.0.0"):
     log = tmp_path / "calls.log"
-    log.touch()
     script = tmp_path / "docker"
     script.write_text(FAKE_DOCKER.format(log=log, info=info))
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    # The first exec of a new file can take a few hundred ms (e.g. macOS scans it); pay that here, not inside the
+    # short timing windows of the tests.
+    subprocess.run([str(script), "warm-up"], capture_output=True, timeout=30)
+    log.write_text("")
     return str(script), log
 
 
@@ -102,6 +119,58 @@ def test_restarts_when_cancelled(tmp_path):
     killed = [c[1] for c in recorded if c[0] == "kill"]
     assert len(killed) == 1 and ["start", killed[0]] in recorded
     assert any(e.get("restore") for e in chaos.log)
+
+
+def run_for(chaos, seconds):
+    async def go():
+        stop = asyncio.Event()
+        task = asyncio.create_task(chaos.run(stop))
+        await asyncio.sleep(seconds)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5)
+
+    asyncio.run(go())
+
+
+def test_container_ids_come_from_stdout_only(tmp_path):
+    docker, _ = make_docker(tmp_path)
+    chaos = Chaos(["api", "noisy", "broken"], seed=1, repo_root=tmp_path, docker=docker)
+    found = asyncio.run(chaos.running_containers())
+    assert found == [("api", "aaaaaaaaaaaa1111"), ("api", "bbbbbbbbbbbb2222"), ("noisy", "ffffffffffff6666")]
+    [failed] = [e for e in chaos.log if e["event"] == "list"]
+    assert failed["service"] == "broken" and not failed["ok"]
+    assert "no such service: broken" in failed["detail"]
+
+
+def test_failed_kill_is_logged_and_not_started(tmp_path):
+    docker, log = make_docker(tmp_path)
+    chaos = Chaos(["gone"], seed=1, repo_root=tmp_path, interval_s=(0.01, 0.02), down_s=0.01, docker=docker)
+    run_for(chaos, 0.5)
+    recorded = calls(log)
+    assert ["kill", "dddddddddddd4444"] in recorded
+    assert not any(c[0] == "start" for c in recorded)
+    kills = [e for e in chaos.log if e["event"] == "kill"]
+    assert kills and all(not e["ok"] and "is not running" in e["detail"] for e in kills)
+    assert chaos.kills == 0
+    assert chaos._down == {}
+    assert not any(e["event"] == "start" for e in chaos.log)
+
+
+def test_timed_out_kill_is_still_started_again(tmp_path):
+    docker, log = make_docker(tmp_path)
+    chaos = Chaos(["slow"], seed=1, repo_root=tmp_path, interval_s=(0.01, 0.02), down_s=0.01, docker=docker)
+    real_exec = chaos._exec
+
+    async def short_kill_timeout(*args, timeout=20.0):
+        return await real_exec(*args, timeout=0.2 if args[0] == "kill" else timeout)
+
+    chaos._exec = short_kill_timeout
+    run_for(chaos, 0.5)
+    recorded = calls(log)
+    assert ["kill", "eeeeeeeeeeee5555"] in recorded
+    assert ["start", "eeeeeeeeeeee5555"] in recorded
+    assert any(e["event"] == "kill" and not e["ok"] and "timed out" in e["detail"] for e in chaos.log)
+    assert chaos._down == {}
 
 
 def test_warns_when_docker_is_missing(tmp_path, capsys):

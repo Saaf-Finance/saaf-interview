@@ -27,6 +27,14 @@ def start(graph, name: str, thread_id: str | None = None) -> dict:
     return graph.invoke({"ticket": TICKETS[name], "lookups": 0}, cfg(thread_id))
 
 
+def test_build_graph_requires_a_checkpointer():
+    with pytest.raises(TypeError):
+        build_graph()
+    for missing in (None, False):
+        with pytest.raises(ValueError, match="checkpointer"):
+            build_graph(missing)
+
+
 def test_not_refund_skips_order_lookup_and_replies(graph, fake_llm, fake_commerce):
     result = start(graph, "question")
 

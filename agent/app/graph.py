@@ -18,6 +18,7 @@ Each node returns a partial state update; routing happens in the small `route_*`
 from typing import Literal, TypedDict
 
 from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
@@ -135,8 +136,10 @@ def route_after_approval(state: AgentState) -> Literal["issue_refund", "draft_re
 
 # --- graph -------------------------------------------------------------------------------------
 
-def build_graph(checkpointer=None):
+def build_graph(checkpointer: BaseCheckpointSaver):
     """Build and compile the workflow. A checkpointer is required for the approval pause."""
+    if not isinstance(checkpointer, BaseCheckpointSaver):
+        raise ValueError("build_graph() requires a checkpointer: request_approval pauses the run with interrupt()")
     builder = StateGraph(AgentState)
     builder.add_node("classify", classify)
     builder.add_node("lookup_order", lookup_order)

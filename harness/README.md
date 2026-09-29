@@ -47,7 +47,8 @@ refunds and emails were cleared from the ledgers. The bench warns when this happ
      30 s timeout. Connection errors, timeouts, `429` and `5xx` are retried up to 5 attempts in total, with 1, 2, 4
      and 8 s between attempts. Every attempt is recorded. The time of a ticket's first attempt is its start time.
      Partner integrations deliver at least once, so 5% of tickets (a seeded sample; `--duplicate-rate`) are delivered
-     a second time, 0.5–5 s after the first delivery finishes, with the same `Idempotency-Key`.
+     a second time, 0.5–5 s after the first delivery finishes, with the same `Idempotency-Key`. The second delivery
+     is retried the same way, and its attempts are recorded too.
    - **Approver.** Every second it calls `GET /runs?status=awaiting_approval`. When it first sees a run waiting, it
      waits that ticket's approval delay (3–15 s, from the workload) and then calls `POST /runs/{run_id}/approve` with
      `{"approved": true|false, "approver": "harness"}`. About 80% of these are approvals. Errors are retried on the
@@ -86,7 +87,7 @@ run** is one with status `completed` or `failed`.
 
 | Metric | Definition |
 |---|---|
-| lost runs | Tickets with no finished run at the end of the drain. This includes tickets never accepted, runs stuck in `queued`, `running` or `awaiting_approval`, runs the service forgot, and tickets whose `GET /runs?ticket_id=` failed during verification. |
+| lost runs | Tickets with no finished run at the end of the drain. This includes tickets never accepted, runs stuck in `queued`, `running` or `awaiting_approval`, runs the service forgot, and tickets whose `GET /runs?ticket_id=` failed during verification. Run records without a `run_id` are ignored. |
 | duplicate runs | Tickets for which `GET /runs?ticket_id=` returns more than one run. Retries and duplicate deliveries of the same ticket carry the same `Idempotency-Key` and must not start a second run. |
 | duplicate refunds | Summed over tickets: `max(0, refunds − 1)`. A ticket refunded three times counts 2. |
 | unexpected refunds | Tickets that got at least one refund but should not have: final sale, outside the window, not a refund request, partially shipped, or rejected by the manager. |
@@ -117,7 +118,7 @@ If the store ledger can't be read, the refund metrics show `n/a` and fail.
 | dropped streams | Streaming responses the provider cut off before `[DONE]`. |
 | LLM cost | Total cost of the bench, and cost per ticket (p50, p95, max). Cost is attributed to tickets by the `X-Ticket-Id` header. A ticket with no calls costs $0. |
 | partially shipped vs other tickets | Mean LLM cost per ticket for partially shipped orders compared with all other tickets. |
-| submit attempts / tickets never accepted | All `POST /runs` attempts, and tickets for which no attempt got a `2xx`. |
+| submit attempts / tickets never accepted | All `POST /runs` attempts, including retries and duplicate deliveries, and tickets for which no attempt got a `2xx`. |
 | approval tickets seen waiting | Tickets that needed approval and that the harness saw in `awaiting_approval`, out of all such tickets submitted. |
 
 Percentiles use the nearest-rank method: p95 is the smallest value with at least 95% of the values at or below it.
@@ -129,8 +130,8 @@ Percentiles use the nearest-rank method: p95 is the smallest value with at least
   - `chaos`: targets and the full kill and start log.
   - `warnings`.
   - `metrics`: the scoreboard values, per-customer latency, flagged ticket ids and one row per ticket. Each row has
-    every submit attempt, the runs, refunds, email count, approval attempts, LLM calls and cost, and the metrics it
-    failed.
+    every submit attempt (a second delivery's under `duplicate_delivery`), the runs, refunds, email count, approval
+    attempts, LLM calls and cost, and the metrics it failed.
   - `ledgers`: the ledger summaries, plus every refund and email.
 - `results/latest.md` holds the scoreboard, the flagged tickets and the chaos log.
 

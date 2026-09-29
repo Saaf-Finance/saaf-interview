@@ -4,6 +4,7 @@ import asyncio
 import socket
 import threading
 import time
+from urllib.parse import unquote
 
 import fakes
 from harness.approver import Approver
@@ -89,6 +90,40 @@ def test_load_records_connection_errors_and_timeouts():
     attempts = results["T-00001"].attempts
     assert "Timeout" in attempts[0]["error"] and attempts[1]["status"] == 202
     assert results["T-00001"].accepted
+
+
+def test_duplicate_delivery_is_retried_like_the_first():
+    app = Scripted([500] * 5 + [503, 429, 202])
+    server = fakes.Server(app).start()
+    try:
+        runner = LoadRunner(server.url, backoff_s=(0.01,), duplicate_rate=1.0)
+        runner._duplicate_delay = lambda ticket_id: 0.01
+        results = asyncio.run(runner.run([Arrival(0.0, "steady", ticket())]))
+        app.statuses = [202, 422]
+        runner = LoadRunner(server.url, backoff_s=(0.01,), duplicate_rate=1.0)
+        runner._duplicate_delay = lambda ticket_id: 0.01
+        results.update(asyncio.run(runner.run([Arrival(0.0, "steady", ticket("T-00002"))])))
+    finally:
+        server.stop()
+    first = results["T-00001"]
+    assert [a["status"] for a in first.attempts] == [500] * 5
+    assert [a["status"] for a in first.duplicate_delivery] == [503, 429, 202]
+    assert [a["attempt"] for a in first.duplicate_delivery] == [1, 2, 3]
+    assert first.accepted and first.run_id == "run-1"  # accepted by the second delivery
+    assert first.to_dict()["duplicate_delivery"] == first.duplicate_delivery
+    assert all(key == "T-00001" for _, key, _ in app.calls[:8])
+    second = results["T-00002"]
+    assert [a["status"] for a in second.duplicate_delivery] == [422]  # 4xx is not retried
+    assert results["T-00002"].attempts[0]["status"] == 202 and second.accepted
+
+
+def test_duplicate_delivery_retries_connection_errors():
+    runner = LoadRunner(closed_port_url(), backoff_s=(0.01,), duplicate_rate=1.0)
+    runner._duplicate_delay = lambda ticket_id: 0.01
+    result = asyncio.run(runner.run([Arrival(0.0, "steady", ticket())]))["T-00001"]
+    assert len(result.attempts) == 5 and len(result.duplicate_delivery) == 5
+    assert all(a["status"] is None and "Connect" in a["error"] for a in result.duplicate_delivery)
+    assert not result.accepted
 
 
 def test_load_is_open_loop():
@@ -207,6 +242,62 @@ def test_approver_with_service_down():
     assert approver.poll_errors >= 2 and approver.per_ticket() == {}
 
 
+def test_approver_skips_malformed_run_records():
+    records = [
+        "r-string", None, 42, ["r-list"],
+        {"ticket_id": "T-X", "status": "awaiting_approval"},  # no run_id
+        {"run_id": None, "ticket_id": "T-X", "status": "awaiting_approval"},
+        {"run_id": True, "ticket_id": "T-X", "status": "awaiting_approval"},
+        {"run_id": 1.5, "ticket_id": "T-X", "status": "awaiting_approval"},
+        {"run_id": "", "ticket_id": "T-X", "status": "awaiting_approval"},
+        {"run_id": "  ", "ticket_id": "T-X", "status": "awaiting_approval"},
+        {"run_id": {"id": "r"}, "ticket_id": "T-X", "status": "awaiting_approval"},
+        {"run_id": "r-no-ticket", "status": "awaiting_approval"},
+        {"run_id": "r-int-ticket", "ticket_id": 3, "status": "awaiting_approval"},
+        {"run_id": "r-empty-ticket", "ticket_id": "", "status": "awaiting_approval"},
+        {"run_id": "r-list-ticket", "ticket_id": ["T1"], "status": "awaiting_approval"},
+        {"run_id": "r-dict-ticket", "ticket_id": {"id": "T1"}, "status": "awaiting_approval"},
+        {"run_id": "r1", "ticket_id": "T1", "status": "awaiting_approval"},
+        {"run_id": 7, "ticket_id": "T2", "status": "awaiting_approval"},  # integer ids are valid
+        {"run_id": "r 3/x\n", "ticket_id": "T3", "status": "awaiting_approval"},  # sent percent-encoded
+    ]
+
+    class Mixed:
+        def __init__(self):
+            self.gets = 0
+            self.approved = []
+
+        def handle(self, method, path, query, headers, body):
+            if method == "GET":
+                self.gets += 1
+                return 200, {"runs": records}
+            self.approved.append(unquote(path.split("/")[2]))
+            return 200, {"ok": True}
+
+    app = Mixed()
+    server = fakes.Server(app).start()
+
+    async def go():
+        expected = {t: {"approval": "approve", "approval_delay_s": 0.0} for t in ("T1", "T2", "T3")}
+        approver = Approver(server.url, expected, poll_interval_s=0.05)
+        stop = asyncio.Event()
+        task = asyncio.create_task(approver.run(stop))
+        await asyncio.sleep(0.4)
+        stop.set()
+        await task
+        return approver
+
+    try:
+        approver = asyncio.run(go())
+    finally:
+        server.stop()
+    assert list(approver.runs) == ["r1", "7", "r 3/x\n"]
+    assert sorted(app.approved) == sorted(approver.runs)  # each approved exactly once, at its own URL
+    per_ticket = approver.per_ticket()
+    assert sorted(per_ticket) == ["T1", "T2", "T3"] and all(e["confirmed"] for e in per_ticket.values())
+    assert approver.polls >= 3 and app.gets >= 3 and approver.poll_errors == 0
+
+
 def test_observe_with_malformed_and_missing_data(workload, services):
     sut, llm, commerce, servers = services(faults={"malformed_runs": {"T-00002"}})
     sut_url, llm_url, commerce_url = (s.url for s in servers)
@@ -226,6 +317,12 @@ def test_observe_with_malformed_and_missing_data(workload, services):
     assert obs["commerce"] is None and "refunds" in obs["commerce_error"]
     assert obs["llm"] is not None and obs["llm_error"] is None  # fell back to the raw ledger
     assert obs["llm"]["per_ticket"]["T-00001"]["calls"] >= 1
+
+    llm.mode = "ok"
+    llm.ledger = lambda: {"calls": 99, "by_status": {"200": 99}}  # a partial summary: no cost or per-ticket data
+    obs = asyncio.run(observe(sut_url, llm_url, commerce_url, tickets))
+    assert obs["llm"] is not None and obs["llm_error"] is None  # fell back to the raw ledger
+    assert obs["llm"]["calls"] == len(llm.entries) and obs["llm"]["per_ticket"]["T-00001"]["calls"] >= 1
 
     llm.mode = "error"
     obs = asyncio.run(observe(sut_url, llm_url, commerce_url, tickets))

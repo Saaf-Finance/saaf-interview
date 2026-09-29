@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import atexit
+import math
 import platform
 import signal
 import sys
@@ -47,18 +48,43 @@ def log(message: str) -> None:
     print(f"[{time.monotonic() - _t0:6.1f}s] {message}", file=sys.stderr, flush=True)
 
 
+def _finite_float(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a number, got {text!r}") from None
+    if not math.isfinite(value):
+        raise argparse.ArgumentTypeError(f"expected a finite number, got {text!r}")
+    return value
+
+
+def _seconds(text: str) -> float:
+    value = _finite_float(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"expected a number of seconds >= 0, got {text!r}")
+    return value
+
+
+def _rate(text: str) -> float:
+    value = _finite_float(text)
+    if not 0.0 <= value <= 1.0:
+        raise argparse.ArgumentTypeError(f"expected a number between 0 and 1, got {text!r}")
+    return value
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="python -m harness.bench", description="Benchmark the agent service.")
     p.add_argument("--profile", choices=list(PROFILES), default="standard")
     p.add_argument("--chaos", action=argparse.BooleanOptionalAction, default=None,
                    help="kill and restart service containers during the run (default: on, except for smoke)")
     p.add_argument("--seed", type=int, default=42, help="seeds arrival jitter, spike ticket choice and chaos timing")
-    p.add_argument("--duplicate-rate", type=float, default=0.05,
-                   help="share of tickets delivered twice with the same Idempotency-Key (at-least-once delivery)")
+    p.add_argument("--duplicate-rate", type=_rate, default=0.05,
+                   help="share of tickets (0 to 1) delivered twice with the same Idempotency-Key "
+                        "(at-least-once delivery)")
     p.add_argument("--sut", default="http://localhost:8000", help="the agent service")
     p.add_argument("--llm", default="http://localhost:8100", help="the fake LLM provider")
     p.add_argument("--commerce", default="http://localhost:8200", help="the store backend")
-    p.add_argument("--drain-timeout", type=float, default=180.0,
+    p.add_argument("--drain-timeout", type=_seconds, default=180.0,
                    help="seconds to wait after the last submit for every ticket to finish")
     p.add_argument("--out", default="results", help="directory for the JSON result and latest.md")
     p.add_argument("--workload", default=str(DEFAULT_WORKLOAD_PATH), help=argparse.SUPPRESS)
@@ -110,15 +136,25 @@ async def tickets_with_runs(client: httpx.AsyncClient, sut_url: str, ticket_ids:
 
 async def drain(client: httpx.AsyncClient, sut_url: str, ticket_ids: list[str], timeout_s: float,
                 approver: Approver) -> dict:
-    """Poll until every ticket has a finished run (completed or failed) or the timeout passes."""
+    """Poll until every ticket has a finished run (completed or failed) or the timeout passes.
+
+    The timeout is a deadline: each lookup is cut off when it runs out, and no lookup starts after it, so a stalled
+    service cannot hold the drain open."""
     start = time.monotonic()
+    deadline = start + timeout_s
     pending = set(ticket_ids)
     semaphore = asyncio.Semaphore(16)
     last_log = 0.0
 
     async def finished(ticket_id: str) -> bool:
         async with semaphore:
-            runs, _ = await fetch_runs(client, sut_url, ticket_id, attempts=1)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            try:
+                runs, _ = await asyncio.wait_for(fetch_runs(client, sut_url, ticket_id, attempts=1), remaining)
+            except asyncio.TimeoutError:
+                return False
         return any(isinstance(r.get("status"), str) and r["status"].lower() in TERMINAL_STATUSES for r in runs)
 
     while pending:

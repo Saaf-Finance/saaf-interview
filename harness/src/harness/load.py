@@ -4,7 +4,8 @@ Every submit uses `Idempotency-Key: <ticket_id>`. Connection errors, timeouts, 4
 with 1, 2, 4, 8 s backoff. Every attempt is recorded; the first attempt's timestamp is the ticket's start time.
 
 Partner integrations deliver at least once, so a seeded sample of tickets (`duplicate_rate`) is delivered a second
-time, 0.5-5 s after the first delivery finishes, with the same Idempotency-Key.
+time, 0.5-5 s after the first delivery finishes, with the same Idempotency-Key. The second delivery is retried the same
+way, and its attempts are recorded separately in `duplicate_delivery`.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ class SubmitResult:
     attempts: list[dict] = field(default_factory=list)
     accepted: bool = False
     run_id: str | None = None
-    duplicate_delivery: dict | None = None
+    duplicate_delivery: list[dict] | None = None  # attempts of the second delivery; None if delivered once
 
     @property
     def first_submit_ts(self) -> float | None:
@@ -110,22 +111,15 @@ class LoadRunner:
         return 0.5 + 4.5 * int.from_bytes(digest[4:8], "big") / 2**32
 
     async def _deliver_again(self, client: httpx.AsyncClient, ticket: dict, result: SubmitResult) -> None:
-        """One more delivery with the same Idempotency-Key, not retried."""
-        body = {k: ticket[k] for k in ("ticket_id", "customer_id", "order_id", "email", "message")}
-        record: dict = {"ts": time.time(), "status": None, "error": None}
-        start = time.monotonic()
-        try:
-            resp = await client.post(f"{self.sut_url}/runs", json=body, headers={"Idempotency-Key": ticket["ticket_id"]})
-            record["status"] = resp.status_code
-            if 200 <= resp.status_code < 300 and not result.accepted:
-                result.accepted = True
-                result.run_id = _run_id(resp)
-        except httpx.HTTPError as exc:
-            record["error"] = f"{type(exc).__name__}: {exc}"[:200]
-        record["latency_s"] = round(time.monotonic() - start, 4)
-        result.duplicate_delivery = record
+        """One more delivery with the same Idempotency-Key and the same retry policy as the first."""
+        result.duplicate_delivery = []
+        await self._post(client, ticket, result, result.duplicate_delivery)
 
     async def _submit(self, client: httpx.AsyncClient, ticket: dict, result: SubmitResult) -> None:
+        await self._post(client, ticket, result, result.attempts)
+
+    async def _post(self, client: httpx.AsyncClient, ticket: dict, result: SubmitResult, attempts: list[dict]) -> None:
+        """POST /runs until accepted or out of attempts, appending every attempt to `attempts`."""
         body = {k: ticket[k] for k in ("ticket_id", "customer_id", "order_id", "email", "message")}
         headers = {"Idempotency-Key": ticket["ticket_id"]}
         for attempt in range(1, self.max_attempts + 1):
@@ -136,8 +130,9 @@ class LoadRunner:
                 resp = await client.post(f"{self.sut_url}/runs", json=body, headers=headers)
                 record["status"] = resp.status_code
                 if 200 <= resp.status_code < 300:
-                    result.accepted = True
-                    result.run_id = _run_id(resp)
+                    if not result.accepted:
+                        result.accepted = True
+                        result.run_id = _run_id(resp)
                 else:
                     retry = _retryable(resp.status_code)
             except httpx.TransportError as exc:  # connect errors, timeouts, dropped connections
@@ -146,7 +141,7 @@ class LoadRunner:
             except httpx.HTTPError as exc:  # e.g. an undecodable response body: not worth retrying
                 record["error"] = f"{type(exc).__name__}: {exc}"[:200]
             record["latency_s"] = round(time.monotonic() - start, 4)
-            result.attempts.append(record)
+            attempts.append(record)
             if not retry or attempt == self.max_attempts:
                 return
             await asyncio.sleep(self.backoff_s[min(attempt - 1, len(self.backoff_s) - 1)])

@@ -1,7 +1,13 @@
 """End-to-end: the bench CLI against the in-process fakes."""
 
+import asyncio
 import json
 import stat
+import time
+from types import SimpleNamespace
+
+import httpx
+import pytest
 
 from harness import bench, profiles
 from harness.profiles import Phase
@@ -32,7 +38,7 @@ def test_smoke_profile_against_a_correct_service(services, tmp_path, capsys):
     assert metrics["hard"] == dict.fromkeys(metrics["hard"], 0)
     assert result["meta"]["tickets"] == 30 and result["meta"]["drain"]["complete"]
     assert result["chaos"] == {"enabled": False, "targets": [], "kills": 0, "warning": None, "log": []}
-    assert metrics["soft"]["submits"] == {"tickets": 30, "attempts": 30, "failed_tickets": 0}
+    assert metrics["soft"]["submits"] == {"tickets": 30, "attempts": 31, "failed_tickets": 0}  # T-00005 sent twice
     assert metrics["info"]["approvals"]["tickets_requiring_approval"] == 1
     assert metrics["info"]["approvals"]["seen_waiting"] == 1
     assert metrics["soft"]["latency_automated_s"]["n"] == 29
@@ -107,3 +113,60 @@ def test_unreachable_service_exits_with_error(tmp_path, capsys, monkeypatch):
     assert code == 2
     assert "Is `make up` running?" in capsys.readouterr().err
     assert not list(tmp_path.glob("*.json"))
+
+
+def test_numeric_options_accept_their_boundaries():
+    args = bench.parse_args(["--drain-timeout=0", "--duplicate-rate=1"])
+    assert args.drain_timeout == 0.0 and args.duplicate_rate == 1.0
+    args = bench.parse_args(["--duplicate-rate=0"])
+    assert args.drain_timeout == 180.0 and args.duplicate_rate == 0.0
+
+
+@pytest.mark.parametrize("option, value, message", [
+    ("--drain-timeout", "nan", "finite"),
+    ("--drain-timeout", "inf", "finite"),
+    ("--drain-timeout", "-inf", "finite"),
+    ("--drain-timeout", "-1", ">= 0"),
+    ("--drain-timeout", "soon", "expected a number"),
+    ("--duplicate-rate", "nan", "finite"),
+    ("--duplicate-rate", "inf", "finite"),
+    ("--duplicate-rate", "-0.1", "between 0 and 1"),
+    ("--duplicate-rate", "1.5", "between 0 and 1"),
+    ("--duplicate-rate", "half", "expected a number"),
+])
+def test_rejects_bad_numeric_options(option, value, message, capsys):
+    with pytest.raises(SystemExit) as exc:
+        bench.parse_args([f"{option}={value}"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert f"argument {option}:" in err and message in err
+
+
+def test_drain_ends_at_its_timeout_when_run_lookups_hang():
+    timeout_s = 0.5
+    lookups: list[tuple[str, float]] = []
+
+    async def stalled_service(request: httpx.Request) -> httpx.Response:
+        ticket_id = request.url.params["ticket_id"]
+        lookups.append((ticket_id, time.monotonic()))
+        if ticket_id == "T-00000":
+            return httpx.Response(200, json={"runs": [{"run_id": "r0", "ticket_id": ticket_id, "status": "completed"}]})
+        await asyncio.sleep(3600)
+        return httpx.Response(200, json={"runs": []})
+
+    tickets = [f"T-{i:05d}" for i in range(100)]
+
+    async def run() -> tuple[dict, float, float]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(stalled_service)) as client:
+            started = time.monotonic()
+            info = await asyncio.wait_for(
+                bench.drain(client, "http://sut", tickets, timeout_s, SimpleNamespace(pending=0)), timeout=10)
+            return info, started, time.monotonic() - started
+
+    info, started, elapsed = asyncio.run(run())
+    assert elapsed < timeout_s + 1.0
+    assert info["complete"] is False and info["duration_s"] < timeout_s + 1.0
+    assert info["unfinished"] == 99 and "T-00000" not in info["unfinished_tickets"]
+    # Lookups queued behind the stalled ones are never sent once the deadline has passed.
+    assert len(lookups) < len(tickets)
+    assert all(at < started + timeout_s for _, at in lookups)

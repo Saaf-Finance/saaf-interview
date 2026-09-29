@@ -59,7 +59,11 @@ async def get_json(client: httpx.AsyncClient, url: str, *, params: dict | None =
 
 
 def normalize_runs(body: Any, ticket_id: str) -> tuple[list[dict], str | None]:
-    """Extract this ticket's run records from a GET /runs?ticket_id= response, dropping malformed entries."""
+    """Extract this ticket's run records from a GET /runs?ticket_id= response, dropping malformed entries.
+
+    A record without a non-empty `run_id` is malformed (the contract requires one) and is dropped, so it can't make a
+    ticket look finished.
+    """
     raw = body.get("runs") if isinstance(body, dict) else body
     if not isinstance(raw, list):
         return [], "response has no 'runs' list"
@@ -70,10 +74,12 @@ def normalize_runs(body: Any, ticket_id: str) -> tuple[list[dict], str | None]:
         if record.get("ticket_id") not in (None, ticket_id):
             continue
         run_id = record.get("run_id")
-        if run_id is not None:
-            if str(run_id) in seen:
-                continue
-            seen.add(str(run_id))
+        if isinstance(run_id, bool) or not isinstance(run_id, (str, int)):
+            continue
+        key = str(run_id)
+        if not key.strip() or key in seen:
+            continue
+        seen.add(key)
         runs.append(record)
     return runs, None
 
@@ -123,27 +129,31 @@ def normalize_commerce(body: Any) -> tuple[dict | None, str | None]:
 
 
 def normalize_llm(body: Any) -> tuple[dict | None, str | None]:
-    """Normalize the LLM provider's GET /ledger summary."""
-    if not isinstance(body, dict) or not ({"calls", "by_status", "per_ticket"} & body.keys()):
-        return None, "LLM ledger has none of 'calls', 'by_status', 'per_ticket'"
-    raw_status = body.get("by_status") if isinstance(body.get("by_status"), dict) else {}
-    by_status = {str(k): int(_num(v) or 0) for k, v in raw_status.items()}
+    """Normalize the LLM provider's GET /ledger summary.
+
+    Every field the metrics use must be present and well-formed; otherwise the summary is rejected (and observe() falls
+    back to the raw ledger) rather than reporting zeros for what's missing.
+    """
+    if not isinstance(body, dict):
+        return None, "LLM ledger summary is not a JSON object"
+    invalid = [k for k in ("calls", "cost_usd", "dropped_streams") if _num(body.get(k)) is None]
+    invalid += [k for k in ("by_status", "per_ticket") if not isinstance(body.get(k), dict)]
+    if invalid:
+        return None, f"LLM ledger summary is missing or has invalid {', '.join(repr(k) for k in invalid)}"
+    by_status = {str(k): int(_num(v) or 0) for k, v in body["by_status"].items()}
     per_ticket = {}
-    raw_per_ticket = body.get("per_ticket") if isinstance(body.get("per_ticket"), dict) else {}
-    for key, value in raw_per_ticket.items():
+    for key, value in body["per_ticket"].items():
         if isinstance(value, dict):
             per_ticket[str(key)] = {
                 "calls": int(_num(value.get("calls")) or 0),
                 "ok_calls": int(_num(value.get("ok_calls")) or 0),
                 "cost_usd": _num(value.get("cost_usd")) or 0.0,
             }
-    calls = _num(body.get("calls"))
-    cost = _num(body.get("cost_usd"))
     return {
-        "calls": int(calls) if calls is not None else sum(by_status.values()),
+        "calls": int(_num(body["calls"])),
         "by_status": by_status,
-        "cost_usd": cost if cost is not None else sum(v["cost_usd"] for v in per_ticket.values()),
-        "dropped_streams": int(_num(body.get("dropped_streams")) or 0),
+        "cost_usd": _num(body["cost_usd"]),
+        "dropped_streams": int(_num(body["dropped_streams"])),
         "per_ticket": per_ticket,
     }, None
 
@@ -255,6 +265,11 @@ def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+def _post_attempts(submit: dict) -> int:
+    """Every POST /runs attempt for a ticket: the first delivery's and, if it was delivered twice, the second's."""
+    return len(submit.get("attempts") or []) + len(submit.get("duplicate_delivery") or [])
+
+
 def _run_summary(run: dict) -> dict:
     error = run.get("error")
     return {
@@ -270,7 +285,7 @@ def compute(submits: list[dict], workload: dict, observed: dict, approvals: dict
     """All metrics for one bench run.
 
     submits:   SubmitResult.to_dict() for every submitted ticket (needs ticket_id, customer_id, first_submit_ts,
-               accepted, attempts).
+               accepted, attempts; duplicate_delivery holds the second delivery's attempts, if any).
     observed:  output of observe().
     approvals: Approver.per_ticket(): ticket_id -> {"decision": bool, "approved_ts": float | None, ...}.
     """
@@ -369,6 +384,7 @@ def compute(submits: list[dict], workload: dict, observed: dict, approvals: dict
             "requires_approval": bool(exp.get("requires_approval")),
             "first_submit_ts": first_ts,
             "submit_attempts": submit.get("attempts", []),
+            "duplicate_delivery": submit.get("duplicate_delivery"),
             "accepted": bool(submit.get("accepted")),
             "runs": [_run_summary(r) for r in runs],
             "run_query_error": observed.get("run_errors", {}).get(tid),
@@ -445,7 +461,7 @@ def compute(submits: list[dict], workload: dict, observed: dict, approvals: dict
         "cost": cost_metrics,
         "submits": {
             "tickets": len(submits),
-            "attempts": sum(len(s.get("attempts", [])) for s in submits),
+            "attempts": sum(_post_attempts(s) for s in submits),
             "failed_tickets": sum(1 for s in submits if not s.get("accepted")),
         },
     }
