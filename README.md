@@ -11,8 +11,8 @@ its own folder, named after the role it's for.
 
 - Your recruiter will tell you which assignment is yours. Everything you need is in that folder: start with its README.
 - Work only in your role's folder. The others are for other roles.
-- Keep your solution private: share a private repository with us, or send a zip. Please don't fork this repository
-  publicly.
+- Keep your solution private. Your assignment's README says exactly how to submit it. Don't fork this repository:
+  forks of a public repository are always public.
 - AI coding assistants are welcome unless an assignment says otherwise.
 
 ## Adding an assignment

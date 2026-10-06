@@ -111,10 +111,27 @@ Work down the list. If you run out of time, stop and say in `RESULTS.md` what yo
 
 ## What to send back
 
-- This folder with your changes, in a **private** repository shared with us, or as a zip. Please don't fork this
-  repository publicly.
-- `RESULTS.md` with your before and after scoreboards.
-- Optionally, a screen recording of five minutes or less.
+Submit your work as a **private** GitHub repository shared with us. Don't fork this repository: forks of a public
+repository are always public.
+
+1. On GitHub, create an empty **private** repository on your own account, for example `takehome-mlops`.
+2. Point your clone at it and push. Keeping our history lets us see exactly what you changed:
+   ```bash
+   git clone https://github.com/Saaf-Finance/saaf-interview
+   cd saaf-interview
+   git remote set-url origin https://github.com/<your-username>/takehome-mlops.git
+   git push -u origin main
+   ```
+   Then commit and push as you work.
+3. In your repository, go to **Settings → Collaborators → Add people** and invite **`djokester`**.
+4. Before your deadline, reply to your invitation email with the link to your repository.
+
+Your repository should include:
+- your changes to this folder;
+- `RESULTS.md` with your before and after scoreboards;
+- optionally, a link to a screen recording of five minutes or less.
+
+If you can't use GitHub, reply to your invitation email with a zip of this folder instead.
 
 ## How we'll look at it
 
