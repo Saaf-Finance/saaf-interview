@@ -127,7 +127,7 @@ We don't score how many optional items you did, or your choice of queue, databas
 
 ## The follow-up
 
-A 45-minute conversation. We'll walk through your submission, change something about the environment while your system
-is running, and talk about what happens and what you'd do next. AI tools are welcome in that session too.
+A 60-minute technical interview with a senior engineer covering the review of the take-home task, production
+infrastructure fundamentals, containers and CI/CD, Python, and debugging scenarios.
 
 Your code remains yours. This is an exercise, and we won't use your submission in our products.
